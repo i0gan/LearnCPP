@@ -6,6 +6,8 @@
 #include <functional>
 #include <memory>
 #include <map>
+#include <list>
+
 using namespace std;
 using namespace std::chrono;
 
@@ -22,7 +24,12 @@ public:
         void unhandled_exception() noexcept {}
         Coroutine get_return_object() { return Coroutine{ handle_type::from_promise(*this) }; }
         void return_void() {}
-        int await_resume() {}
+        // co_yield surport
+        template<std::convertible_to<T> From>
+        std::suspend_always yield_value(From&& from) {
+            value_ = std::forward<From>(from); // caching the result in promise
+            return {};
+        }
     };
     using handle_type = std::coroutine_handle<promise_type>;
     explicit Coroutine(handle_type handle) : coro_handle(handle) { started_time_ = time(nullptr); }
@@ -38,7 +45,7 @@ private:
 struct ResumeData{
     string data;
 };
-typedef function< void(const int msg_id, Awaitable *awaitable)> AwaitableHandler;
+typedef function< void(const int req_id, Awaitable *awaitable)> AwaitableHandler;
 class Awaitable {
 public:
     bool await_ready() { return false; }
@@ -130,12 +137,12 @@ public:
     }
     map<string, IModule*> modules_;
     bool is_quit_ = false;
-    vector<Coroutine<int>> cos_;
+    list<Coroutine<int>> cos_;
     map<int, Awaitable*> cos_data_;
 };
 
 void Work::Init(Server *s) {
-    cout << "work init\n";
+    cout << "Work Module init\n";
     this->s_ = s;
     // register handler
     net_ = (INet*)s_->modules_["net"];
@@ -157,7 +164,7 @@ Coroutine<int> Work::HandleReq(const socket_t sock, const int msg_id, const char
 }
 
 Awaitable Work::DoSomeAsync(int req_id) {
-    cout << "Let's do some request ...\n";
+    cout << "\nSimulate this server request another server\n";
     cout << "Bind corotine to req_id, " << " : " << req_id << endl;
     Awaitable awaitable;
     awaitable.req_id = req_id;
@@ -171,7 +178,7 @@ void Work::BindCoroutineHandler(const int req_id, Awaitable* awaitable) {
 }
 
 void Net::Init(Server* s) {
-    cout << "net init\n";
+    cout << "Net Module init\n";
     this->s_ = s;
 }
 
@@ -187,6 +194,7 @@ void Net::Update()
     }
     
     // Crate one coroutine per request
+    cout << "\nSimulate the client requested this server\n";
     for (auto& c : callbacks) {
         auto func = c.second.get();
         string data = "test request";
@@ -196,21 +204,41 @@ void Net::Update()
         // start run
         cout << "Net module: run coroutine...\n";
         co.get_handle().resume();
-        cout << "Net module: recover from coroutine...\n";
+        cout << "Net module: recover from coroutine... for created\n";
     }
     
-    // Simulate an external request and receive a reply
+    cout << "\nSimulate this server request has received a reply\n";
+    // 
     for (auto iter : s_->cos_data_) {
         auto awaitable = iter.second;
         // The reply data transfor to await return value.
         awaitable->data_->data = "network response";
         cout << "Net module: resume corotine: " << awaitable->coroutine_handle_.address() << endl;
         awaitable->coroutine_handle_.resume();
+        cout << "Net module: recover from coroutine... for replyed\n";
     }
-    expire_time = nowtime + 3;
+
+    // Check coroutines is timeout
+
+    // Free the memory
+    cout << "\nFree the coroutines\n";
+    for (auto iter = s_->cos_.begin(); iter != s_->cos_.end();) {
+        std::list<Coroutine<int>>::iterator citer = iter;
+        iter++;
+        if (citer->get_handle().done())
+        {
+            cout << "Destroyed coroutine: " << citer->get_handle().address() << endl;
+            citer->get_handle().destroy();
+            s_->cos_.erase(citer);
+        }
+    }
+    cout << "Next round ...\n\n";
+
+    expire_time = nowtime + 5;
 }
 
 int main() {
+    cout << "The example about c++20 coroutine's usage in none blocked io server\n\n";
     Server s;
     s.Init();
     s.Start();
@@ -224,17 +252,29 @@ int main() {
 }
 
 /*
-net init
-work init
-Net module: created a coroutine: 00000248A8263100
+The example about c++20 coroutine's usage in none blocked io server
+
+Net Module init
+Work Module init
+
+Simulate the client requested this server
+Net module: created a coroutine: 0000022F98893170
 Net module: run coroutine...
 A new corotine stated, Handle Req Recived: test request
-Let's do some request ...
+
+Simulate this server request another server
 Bind corotine to req_id,  : 1
-Coroutine has suspend: 00000248A8263100
+Coroutine has suspend: 0000022F98893170
 Now call the handler
-Now can bind req_id with coroutine, req_id: 1 coroutine: 00000248A8263100
-Net module: recover from coroutine...
-Net module: resume corotine: 00000248A8263100
+Now can bind req_id with coroutine, req_id: 1 coroutine: 0000022F98893170
+Net module: recover from coroutine... for created
+
+Simulate this server request has received a reply
+Net module: resume corotine: 0000022F98893170
 Coroutine resumed: Data: network response
+Net module: recover from coroutine... for replyed
+
+Free the coroutines
+Destroyed coroutine: 0000022F98893170
+Next round ...
 */
